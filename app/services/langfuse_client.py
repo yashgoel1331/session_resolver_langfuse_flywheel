@@ -64,6 +64,7 @@ def build_langfuse_client(credentials: LangfuseCredentials) -> Langfuse:
         public_key=credentials.public_key,
         secret_key=credentials.secret_key,
         base_url=credentials.base_url,
+        timeout=settings.langfuse_timeout_seconds,
     )
 
 

@@ -1,5 +1,6 @@
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Optional
@@ -15,6 +16,11 @@ from app.models.session_resolver import (
 
 SearchField = Literal["input", "output"]
 _WHITESPACE_RE = re.compile(r"\s+")
+# Vision models sometimes substitute common Gujarati synonyms; normalize for matching only.
+_MATCH_SYNONYMS: tuple[tuple[str, str], ...] = (
+    ("માહિતી", "વિગત"),
+    ("માહિતિ", "વિગત"),
+)
 
 
 @dataclass
@@ -50,7 +56,23 @@ def _compact_snippet(text: str, limit: int = 220) -> str:
 
 
 def _normalize_for_match(text: str) -> str:
-    return _normalize_text(text).lower()
+    normalized = unicodedata.normalize("NFC", _normalize_text(text)).casefold()
+    normalized = _normalize_indic_digits(normalized)
+    for source, target in _MATCH_SYNONYMS:
+        normalized = normalized.replace(source.casefold(), target.casefold())
+    return normalized
+
+
+def _normalize_indic_digits(text: str) -> str:
+    chars: list[str] = []
+    for ch in text:
+        if "\u0ae6" <= ch <= "\u0aef":
+            chars.append(chr(ord("0") + ord(ch) - 0x0AE6))
+        elif "\u0966" <= ch <= "\u096f":
+            chars.append(chr(ord("0") + ord(ch) - 0x0966))
+        else:
+            chars.append(ch)
+    return "".join(chars)
 
 
 def _build_prefix_variants(query: str, min_prefix_chars: int, max_variants: int = 8) -> list[str]:
@@ -91,7 +113,7 @@ def _collect_matches_from_traces(
     seen_trace_ids: set[str] = set()
     query_variants = [
         _normalize_for_match(v)
-        for v in _build_prefix_variants(request.query, request.min_prefix_chars)
+        for v in _build_prefix_variants(request.query or "", request.min_prefix_chars)
     ]
     query_variants = [v for v in query_variants if v]
     if not query_variants:
@@ -171,7 +193,7 @@ def resolve_session_from_text(
     langfuse: Langfuse,
     request: ResolveSessionRequest,
 ) -> ResolveSessionResponse:
-    normalized_query = _normalize_text(request.query)
+    normalized_query = _normalize_text(request.query or "")
     backend: Literal["traces_v1"] = "traces_v1"
     matches = _collect_matches_from_traces(langfuse=langfuse, request=request)
 

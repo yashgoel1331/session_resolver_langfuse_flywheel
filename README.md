@@ -1,15 +1,17 @@
 # Session Resolver
 
-Internal FastAPI service that helps engineers find a **Langfuse session** by pasting text copied from a chat UI, trace view, or support ticket.
+Internal FastAPI service that helps engineers find a **Langfuse session** by pasting text (or a screenshot) copied from a chat UI, trace view, or support ticket.
 
-Typical use case: someone shares a user question or assistant answer snippet, and you need the corresponding Langfuse session link/id without manually searching the UI.
+Typical use case: someone shares a user question, assistant answer snippet, or screenshot, and you need the corresponding Langfuse session link/id without manually searching the UI.
 
 ---
 
 ## What this service does
 
 ```
-Pasted text (query or answer)
+Pasted text OR screenshot
+        ↓
+(Optional) OpenAI vision extraction for screenshots
         ↓
 Scan recent Langfuse traces
         ↓
@@ -41,12 +43,10 @@ This is **not** a chat agent. It is a lookup tool over Langfuse observability da
 | Rank candidates by recency | Ready |
 | Response statuses: `found`, `ambiguous`, `not_found` | Ready |
 
-### Not implemented yet
+### Planned / not implemented yet
 
 | Feature | Status |
 |---|---|
-| Screenshot / image upload | Planned (Phase 3) |
-| Gemini-based text extraction from screenshots | Planned |
 | Observations v2 server-side text search | Not available on our self-hosted Langfuse |
 | Langfuse deep-link URL generation | Not yet returned in API response |
 
@@ -60,6 +60,7 @@ Client
         ├── Auth: X-API-Key
         ├── Langfuse env: X-Langfuse-Environment (dev|prod)
         └── Resolver service
+              ├── OpenAI vision (optional)       # screenshot -> extracted text
               ├── langfuse.api.trace.list(...)   # fetch recent traces with IO
               ├── substring match in Python
               ├── group by sessionId
@@ -79,8 +80,9 @@ session_resolver/
 │   │   ├── health.py
 │   │   └── sessions.py             # /api/sessions/resolve
 │   └── services/
-│       ├── langfuse_client.py      # dev/prod credential selection
-│       └── session_resolver.py     # search + ranking logic
+│       ├── image_query_extractor.py # screenshot text extraction via OpenAI
+│       ├── langfuse_client.py       # dev/prod credential selection
+│       └── session_resolver.py      # search + ranking logic
 ├── requirements.txt
 └── example.env
 ```
@@ -105,6 +107,27 @@ Implications:
 - Search scans a bounded recent trace window (default: 300 traces).
 - Matching happens in this API, not inside Langfuse.
 - Older sessions require narrowing time range or increasing scan size.
+
+---
+
+## Screenshot extraction strategy
+
+When resolving from a screenshot, OpenAI vision (`gpt-4o` by default, configurable via `OPENAI_VISION_MODEL`) runs **verbatim OCR** on the Amul AI UI:
+
+- Targets the **user bubble only** (pink/salmon, top-right) for `user_query`
+- Uses `detail: high` for sharper text reading
+- Forbids paraphrase, synonym swap, digit conversion, and table flattening
+- Sets `agent_response` to `null` when the reply is a data table
+
+Search order after extraction:
+
+1. **User query** — short bubble text, matches `trace.input`, fewer OCR errors.
+2. **Agent opening snippet** — first sentence/lead-in of agent prose (not the full long reply).
+3. **Full agent text** — last resort only when snippet alone is too short.
+
+Table replies → `agent_response` is null; only user query is searched.
+
+Response includes `extracted_user_query` and `extracted_agent_response` for screenshot debugging.
 
 ---
 
@@ -174,6 +197,8 @@ LANGFUSE_DEV_BASE_URL=https://langfuse.dev.amulai.in
 LANGFUSE_PROD_PUBLIC_KEY=pk-lf-...
 LANGFUSE_PROD_SECRET_KEY=sk-lf-...
 LANGFUSE_PROD_BASE_URL=https://langfuse.prod.amulai.in
+
+OPENAI_API_KEY=sk-...   # required only for screenshot-based requests
 ```
 
 Important:
@@ -202,7 +227,7 @@ Open API docs:
 
 ## API usage
 
-### Resolve session from text
+### Resolve session from text or screenshot
 
 `POST /api/sessions/resolve`
 
@@ -232,13 +257,35 @@ Request fields:
 
 | Field | Default | Description |
 |---|---|---|
-| `query` | required | Text to search (user query or assistant answer snippet) |
+| `query` | null | Text to search (user query or assistant answer snippet) |
+| `screenshot_base64` | null | Base64 image content for screenshot-based resolution |
+| `screenshot_mime_type` | `image/png` | MIME type for screenshot data (`image/png`, `image/jpeg`, `image/webp`) |
 | `from_timestamp` | null | Optional lower bound for trace timestamp |
 | `to_timestamp` | null | Optional upper bound for trace timestamp |
 | `max_candidates` | 3 | Max candidates returned when ambiguous |
 | `trace_page_size` | 100 | Traces fetched per page |
 | `trace_pages` | 3 | Number of pages scanned (total traces = size × pages) |
 | `min_prefix_chars` | 40 | Minimum prefix length for fallback matching |
+
+Input rule:
+
+- Provide at least one of `query` or `screenshot_base64`.
+- If only screenshot is provided, OpenAI extracts text with **agent response first** (more specific for matching), then falls back to user query if no agent reply is visible.
+
+Screenshot example:
+
+```bash
+curl -X POST "http://localhost:8090/api/sessions/resolve" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $SESSION_FINDER_API_KEY" \
+  -H "X-Langfuse-Environment: dev" \
+  -d '{
+    "screenshot_base64": "'"$(base64 -w 0 /path/to/screenshot.png)"'",
+    "screenshot_mime_type": "image/png",
+    "trace_pages": 3,
+    "trace_page_size": 100
+  }'
+```
 
 Example response (`found`):
 
@@ -279,10 +326,12 @@ Recommended test matrix for third-party/dev validation:
 2. **Exact assistant answer match** (partial and full paragraph).
 3. **Over-pasted text** (paragraph + heading) to validate prefix fallback.
 4. **Gujarati text** copied verbatim from trace IO.
-5. **Ambiguous query** (generic phrase appearing in multiple sessions).
-6. **Not found** query outside scan window.
-7. **Dev vs prod** switch via `X-Langfuse-Environment`.
-8. **Auth failures** (missing/invalid `X-API-Key`).
+5. **Screenshot-only request** (no query) with valid `OPENAI_API_KEY`.
+6. **Screenshot MIME validation** (e.g. unsupported `image/gif` should fail).
+7. **Ambiguous query** (generic phrase appearing in multiple sessions).
+8. **Not found** query outside scan window.
+9. **Dev vs prod** switch via `X-Langfuse-Environment`.
+10. **Auth failures** (missing/invalid `X-API-Key`).
 
 Suggested tuning experiments:
 
@@ -301,12 +350,13 @@ Suggested tuning experiments:
 
 ### `500 SESSION_FINDER_API_KEY is not configured`
 
-## Current Langfuse capability notes (dev instance)
+- Missing env var on server startup.
 
 ### `502 Session resolution failed ...`
 
 - Usually Langfuse connectivity/auth/host mismatch.
 - Verify keys belong to the selected environment host.
+- If detail contains **`The read operation timed out`**, Langfuse trace fetch is too slow for the default timeout. Set `LANGFUSE_TIMEOUT_SECONDS=60` (or higher) in `.env` and restart the server. Also try reducing scan size (`trace_pages`, `trace_page_size`) or adding `from_timestamp`/`to_timestamp`.
 
 ### `not_found` for text you know exists
 
@@ -326,6 +376,13 @@ set -a
 source .env
 set +a
 ```
+
+### Screenshot request fails with OpenAI error
+
+- Ensure `OPENAI_API_KEY` is set on server.
+- Ensure `screenshot_base64` is raw base64 (no `data:image/...;base64,` prefix).
+- Ensure `screenshot_mime_type` is one of `image/png`, `image/jpeg`, `image/jpg`, `image/webp`.
+- If OpenAI returns no usable text, retry with a clearer screenshot crop.
 
 ---
 
@@ -367,7 +424,6 @@ Expected on self-hosted:
 
 ## Roadmap
 
-1. Phase 3: screenshot upload + Gemini extraction.
-2. Return direct Langfuse session URL in response.
-3. Optional debug mode exposing scan stats (traces scanned, prefixes attempted).
-4. Optional session-id direct lookup shortcut when ID is pasted.
+1. Return direct Langfuse session URL in response.
+2. Optional debug mode exposing scan stats (traces scanned, prefixes attempted).
+3. Optional session-id direct lookup shortcut when ID is pasted.

@@ -26,7 +26,9 @@ class Settings(BaseSettings):
     langfuse_prod_secret_key: Optional[str] = None
     langfuse_prod_base_url: Optional[str] = None
 
-    gemini_api_key: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    openai_vision_model: str = "gpt-4o"
+    langfuse_timeout_seconds: int = 60
 
     base_dir: Path = Path(__file__).resolve().parent.parent
 
