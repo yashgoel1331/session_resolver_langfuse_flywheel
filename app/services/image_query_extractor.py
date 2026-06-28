@@ -11,6 +11,9 @@ _WHITESPACE_RE = re.compile(r"\s+")
 _CODE_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*|\s*```$")
 _DATE_RE = re.compile(r"\d{2}-\d{2}-\d{4}")
 _DECIMAL_RE = re.compile(r"\d+\.\d{2}")
+_LEADING_LIST_MARKER_RE = re.compile(
+    r"(^|\s)[\u2022\u00b7\u25aa\u2023\u2043\u2219\-*]+\s+(?=[A-Za-z0-9])"
+)
 _ALLOWED_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 _OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 
@@ -114,22 +117,26 @@ class ScreenshotExtraction:
     agent_response: str
 
     def search_candidates(self) -> list[str]:
-        """User bubble first; agent opening snippet(s) as fallback. Skip table agent text."""
+        """User bubble first; full agent text then shorter snippets. Skip table agent text."""
         candidates: list[str] = []
         user = self.user_query
         agent = self.agent_response
 
         if user:
-            candidates.append(user)
+            candidates.append(_sanitize_search_text(user))
 
         if _looks_like_table_data(agent):
-            return candidates
+            return [c for c in candidates if c]
+
+        if agent:
+            candidates.append(_sanitize_search_text(agent))
 
         for snippet in _agent_search_snippets(agent):
-            if snippet not in candidates:
-                candidates.append(snippet)
+            normalized_snippet = _sanitize_search_text(snippet)
+            if normalized_snippet and normalized_snippet not in candidates:
+                candidates.append(normalized_snippet)
 
-        return candidates
+        return [c for c in candidates if c]
 
 
 def _apply_text_without_bubble_role(
@@ -174,6 +181,16 @@ def _vision_model() -> str:
 
 def _normalize_text(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", (text or "").strip())
+
+
+def _sanitize_search_text(text: str) -> str:
+    """
+    Keep OCR fields verbatim but sanitize search candidates:
+    - Remove leading bullet/list markers before English list items.
+    - Normalize whitespace.
+    """
+    cleaned = _LEADING_LIST_MARKER_RE.sub(r"\1", text or "")
+    return _normalize_text(cleaned)
 
 
 def _clean_model_output(text: str) -> str:

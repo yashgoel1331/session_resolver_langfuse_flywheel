@@ -16,6 +16,10 @@ from app.models.session_resolver import (
 
 SearchField = Literal["input", "output"]
 _WHITESPACE_RE = re.compile(r"\s+")
+_LIST_MARKER_RE = re.compile(
+    r"(^|\s)[\u2022\u00b7\u25aa\u2023\u2043\u2219\-*]+\s+(?=\w)"
+)
+_MARKDOWN_DECORATOR_RE = re.compile(r"[*_`#]+")
 # Vision models sometimes substitute common Gujarati synonyms; normalize for matching only.
 _MATCH_SYNONYMS: tuple[tuple[str, str], ...] = (
     ("માહિતી", "વિગત"),
@@ -55,8 +59,28 @@ def _compact_snippet(text: str, limit: int = 220) -> str:
     return f"{t[: limit - 3]}..."
 
 
+def _normalize_list_markers(text: str) -> str:
+    """Strip bullet glyphs so OCR '• foo' matches trace 'foo'."""
+    return _WHITESPACE_RE.sub(" ", _LIST_MARKER_RE.sub(r"\1", text)).strip()
+
+
+def _normalize_markdown(text: str) -> str:
+    """Remove common markdown decorators that break exact substring matching."""
+    cleaned = _MARKDOWN_DECORATOR_RE.sub("", text)
+    # Normalize common smart punctuation to ASCII.
+    cleaned = (
+        cleaned.replace("\u2019", "'")
+        .replace("\u2018", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+    )
+    return _normalize_text(cleaned)
+
+
 def _normalize_for_match(text: str) -> str:
     normalized = unicodedata.normalize("NFC", _normalize_text(text)).casefold()
+    normalized = _normalize_markdown(normalized)
+    normalized = _normalize_list_markers(normalized)
     normalized = _normalize_indic_digits(normalized)
     for source, target in _MATCH_SYNONYMS:
         normalized = normalized.replace(source.casefold(), target.casefold())
