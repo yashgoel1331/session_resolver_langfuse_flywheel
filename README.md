@@ -118,6 +118,7 @@ When resolving from a screenshot, OpenAI vision (`gpt-4o` by default, configurab
 - Uses `detail: high` for sharper text reading
 - Forbids paraphrase, synonym swap, digit conversion, and table flattening
 - Sets `agent_response` to `null` when the reply is a data table
+- Optional `text_without_bubble_as` (`user` | `agent`) for screenshots without chat bubbles
 
 Search order after extraction:
 
@@ -260,6 +261,7 @@ Request fields:
 | `query` | null | Text to search (user query or assistant answer snippet) |
 | `screenshot_base64` | null | Base64 image content for screenshot-based resolution |
 | `screenshot_mime_type` | `image/png` | MIME type for screenshot data (`image/png`, `image/jpeg`, `image/webp`) |
+| `text_without_bubble_as` | null | When text is visible but no chat bubble, treat it as `"user"` query or `"agent"` response |
 | `from_timestamp` | null | Optional lower bound for trace timestamp |
 | `to_timestamp` | null | Optional upper bound for trace timestamp |
 | `max_candidates` | 3 | Max candidates returned when ambiguous |
@@ -270,7 +272,8 @@ Request fields:
 Input rule:
 
 - Provide at least one of `query` or `screenshot_base64`.
-- If only screenshot is provided, OpenAI extracts text with **agent response first** (more specific for matching), then falls back to user query if no agent reply is visible.
+- If only screenshot is provided, OpenAI extracts text from user/agent bubbles when visible.
+- Use `text_without_bubble_as` when the screenshot shows plain text without chat bubbles (e.g. a copied snippet or trace view); set to `"user"` or `"agent"` so OCR assigns the text to the correct field.
 
 Screenshot example:
 

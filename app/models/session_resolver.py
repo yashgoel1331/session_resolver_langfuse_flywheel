@@ -19,6 +19,14 @@ class ResolveSessionRequest(BaseModel):
         default="image/png",
         description="MIME type for screenshot_base64 (e.g. image/png, image/jpeg).",
     )
+    text_without_bubble_as: Optional[Literal["user", "agent"]] = Field(
+        default=None,
+        description=(
+            "When the screenshot has visible text but no chat bubble (no pink user "
+            "bubble or white agent bubble), treat that text as a user query or agent "
+            "response. Ignored when bubbles are present."
+        ),
+    )
     from_timestamp: Optional[datetime] = Field(
         default=None, description="Optional lower bound for observation start time."
     )
@@ -56,6 +64,10 @@ class ResolveSessionRequest(BaseModel):
         has_image = bool((self.screenshot_base64 or "").strip())
         if not has_query and not has_image:
             raise ValueError("Provide either `query` or `screenshot_base64`.")
+        if self.text_without_bubble_as is not None and not has_image:
+            raise ValueError(
+                "`text_without_bubble_as` is only valid with `screenshot_base64`."
+            )
         return self
 
 

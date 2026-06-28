@@ -1,7 +1,7 @@
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -80,6 +80,33 @@ Example C — general rules:
 Now OCR the attached screenshot.\
 """
 
+_TEXT_WITHOUT_BUBBLE_PROMPT = """\
+
+## No-bubble fallback (caller hint)
+The caller indicated that text visible WITHOUT a chat bubble should be treated as: {role_label}.
+- If neither a USER bubble (pink/salmon, top-right) nor an AGENT bubble (white, "Amul AI") is visible, put all transcribed text in {target_field} and set the other JSON field to null.
+- If chat bubbles ARE visible, follow the normal bubble rules above and ignore this hint.
+"""
+
+def _build_extraction_prompt(
+    text_without_bubble_as: Literal["user", "agent"] | None = None,
+) -> str:
+    prompt = _EXTRACTION_PROMPT
+    if text_without_bubble_as is None:
+        return prompt
+
+    if text_without_bubble_as == "user":
+        role_label = "user query"
+        target_field = "user_query"
+    else:
+        role_label = "agent response"
+        target_field = "agent_response"
+
+    return prompt + _TEXT_WITHOUT_BUBBLE_PROMPT.format(
+        role_label=role_label,
+        target_field=target_field,
+    )
+
 
 @dataclass(frozen=True)
 class ScreenshotExtraction:
@@ -103,6 +130,34 @@ class ScreenshotExtraction:
                 candidates.append(snippet)
 
         return candidates
+
+
+def _apply_text_without_bubble_role(
+    extraction: ScreenshotExtraction,
+    text_without_bubble_as: Literal["user", "agent"] | None,
+) -> ScreenshotExtraction:
+    """Reassign lone extracted text when bubbles were not visible."""
+    if text_without_bubble_as is None:
+        return extraction
+
+    user = extraction.user_query
+    agent = extraction.agent_response
+
+    if user and agent:
+        return extraction
+
+    lone_text = user or agent
+    if not lone_text:
+        return extraction
+
+    if text_without_bubble_as == "user":
+        if user:
+            return extraction
+        return ScreenshotExtraction(user_query=lone_text, agent_response="")
+
+    if agent:
+        return extraction
+    return ScreenshotExtraction(user_query="", agent_response=lone_text)
 
 
 class ImageQueryExtractionError(Exception):
@@ -229,7 +284,12 @@ def _build_extraction(raw: dict[str, Any]) -> ScreenshotExtraction:
     return ScreenshotExtraction(user_query=user_query, agent_response=agent_response)
 
 
-def extract_texts_from_screenshot(*, screenshot_base64: str, mime_type: str) -> ScreenshotExtraction:
+def extract_texts_from_screenshot(
+    *,
+    screenshot_base64: str,
+    mime_type: str,
+    text_without_bubble_as: Literal["user", "agent"] | None = None,
+) -> ScreenshotExtraction:
     api_key = (settings.openai_api_key or "").strip()
     if not api_key:
         raise ImageQueryExtractionError(
@@ -248,6 +308,8 @@ def extract_texts_from_screenshot(*, screenshot_base64: str, mime_type: str) -> 
     if not image_data:
         raise ImageQueryExtractionError("screenshot_base64 is empty.")
 
+    extraction_prompt = _build_extraction_prompt(text_without_bubble_as)
+
     request_body = {
         "model": _vision_model(),
         "messages": [
@@ -255,7 +317,7 @@ def extract_texts_from_screenshot(*, screenshot_base64: str, mime_type: str) -> 
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": _EXTRACTION_PROMPT},
+                    {"type": "text", "text": extraction_prompt},
                     {
                         "type": "image_url",
                         "image_url": {
@@ -295,6 +357,7 @@ def extract_texts_from_screenshot(*, screenshot_base64: str, mime_type: str) -> 
 
     raw_output = _extract_text_from_openai_response(response.json())
     extraction = _build_extraction(_parse_extraction_payload(raw_output))
+    extraction = _apply_text_without_bubble_role(extraction, text_without_bubble_as)
     if not extraction.search_candidates():
         raise ImageQueryExtractionError(
             "OpenAI could not extract a usable user query or agent response from the screenshot.",

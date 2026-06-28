@@ -51,6 +51,7 @@ async def resolve_session(
             extraction = extract_texts_from_screenshot(
                 screenshot_base64=payload.screenshot_base64 or "",
                 mime_type=payload.screenshot_mime_type,
+                text_without_bubble_as=payload.text_without_bubble_as,
             )
             search_texts = extraction.search_candidates()
 
